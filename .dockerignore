@@ -1,0 +1,11 @@
+.git
+.history
+__pycache__
+*.pyc
+*.db
+frontend/node_modules
+frontend/.next
+blockchain/node_modules
+.venv
+venv
+.pytest_cache

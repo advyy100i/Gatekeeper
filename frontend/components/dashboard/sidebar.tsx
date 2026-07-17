@@ -11,7 +11,8 @@ import {
   CreditCard,
   Play,
   Shield,
-  Fingerprint
+  Fingerprint,
+  BrainCircuit
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -40,6 +41,11 @@ const navigation = [
     name: "Security",
     href: "/security",
     icon: Shield,
+  },
+  {
+    name: "Threat Detection",
+    href: "/anomaly",
+    icon: BrainCircuit,
   },
   {
     name: "Billing",

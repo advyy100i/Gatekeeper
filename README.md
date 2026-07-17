@@ -184,6 +184,16 @@ Returns:
 
 ## Features
 
+### 🧠 Adaptive Behavioral Anomaly Detection (Feature A)
+AI-powered security layer that learns each API key's normal behavior and scores every request in real time — catching attacks that use *valid credentials and well-formed requests* and thus slip past static controls.
+
+- **Two detectors, fused**: a global online model (River `HalfSpaceTrees`) for population-level outliers + per-key EWMA baselines and windowed HyperLogLog for per-entity drift and enumeration.
+- **Async, fail-open**: scoring runs off the hot path via Redis Streams; the gateway's only cost is one cached-score lookup. If the worker/Redis is down, static controls keep enforcing.
+- **Graduated response**: allow → log → **tarpit** (inject latency + rate cut) → block.
+- **Measured on real traffic** (NASA-HTTP, 40k real events / 3,401 real clients, attacks injected from previously-benign real IPs): precision **0.955**, recall **0.926**, FPR **0.001** — and 37 of 39 false positives trace to 2 genuine high-volume crawlers.
+- **Synthetic harness**: precision **1.000**, recall **0.896**, zero false positives.
+- Details, real-traffic caveats & runbook: [FEATURE_A_ANOMALY_DETECTION.md](FEATURE_A_ANOMALY_DETECTION.md) · code in [app/anomaly/](app/anomaly/) · reproduce with `python -m simulator.evaluate_real`.
+
 ### 🔐 Authentication & Security
 - **API Key Authentication**: Secure API key-based authentication for all proxy requests
 - **Header-based Auth**: Simple `X-API-Key` header for easy integration

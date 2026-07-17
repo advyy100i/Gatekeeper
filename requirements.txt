@@ -7,3 +7,15 @@ httpx>=0.24.0
 web3>=6.0.0
 python-dotenv>=1.0.0
 eth-account>=0.10.0
+
+# Feature A — Adaptive Behavioral Anomaly Detection
+river>=0.21          # online / streaming ML (HalfSpaceTrees)
+redis>=5.0           # Redis Streams + per-key baselines (sync + asyncio clients)
+numpy>=1.26
+
+# Production database driver (Postgres). SQLite remains the local default.
+psycopg[binary]>=3.1
+
+# Dev / evaluation
+fakeredis>=2.20      # in-process Redis for tests + the synthetic harness
+pytest>=7.4

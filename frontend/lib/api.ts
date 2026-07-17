@@ -560,4 +560,56 @@ export const api = {
       message?: string;
     }>(`/transparency/blockchain/${batchId}`);
   },
+
+  // --- Adaptive Anomaly Detection (Feature A) ---
+
+  /**
+   * Health of the anomaly detection subsystem (worker liveness, degraded mode,
+   * active thresholds and fusion weights).
+   */
+  getAnomalyStatus: async () => {
+    return apiRequest<{
+      worker_alive: boolean;
+      degraded_mode: boolean;
+      mode: string;
+      thresholds: { log: number; tarpit: number; block: number };
+      weights: { global: number; per_key: number; enumeration: number; auth_abuse: number };
+    }>("/security/anomaly/status");
+  },
+
+  /**
+   * Recent elevated risk decisions (risk >= log threshold), newest first.
+   */
+  getAnomalyScores: async (limit = 50) => {
+    return apiRequest<{
+      count: number;
+      scores: Array<{
+        id: number;
+        api_key_id: number;
+        service_id: number;
+        risk: number;
+        action: string;
+        endpoint: string | null;
+        sub_scores: {
+          global: number;
+          per_key: number;
+          enumeration: number;
+          auth_abuse: number;
+        };
+        timestamp: string | null;
+      }>;
+    }>(`/security/anomaly/scores?limit=${limit}`);
+  },
+
+  /**
+   * Live cached risk decision for a single API key.
+   */
+  getAnomalyRisk: async (apiKeyId: number) => {
+    return apiRequest<{
+      api_key_id: number;
+      action: string;
+      risk: number | null;
+      scored: boolean;
+    }>(`/security/anomaly/risk/${apiKeyId}`);
+  },
 };

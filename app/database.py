@@ -6,13 +6,26 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
 
-# SQLite database file path
+# Database URL. Defaults to local SQLite; set DATABASE_URL to a Postgres DSN in
+# production (managed platforms provide one — see render.yaml / DEPLOYMENT.md).
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./gaas_gateway.db")
 
-# Create SQLite engine
+# Managed platforms (Render/Railway/Heroku) hand out "postgres://" URLs. Route
+# them to the installed psycopg v3 driver via the "postgresql+psycopg://" scheme
+# (plain "postgresql://" would select psycopg2, which we don't install).
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+
+# SQLite needs check_same_thread=False for FastAPI's threadpool; Postgres wants
+# pool_pre_ping so dropped managed-DB connections are recycled transparently.
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False}  # Needed for SQLite
+    connect_args={"check_same_thread": False} if _is_sqlite else {},
+    pool_pre_ping=not _is_sqlite,
 )
 
 # Create session factory
@@ -40,11 +53,17 @@ def init_db():
     """
     # Import all models to ensure they're registered with Base.metadata
     # Import at function level to avoid circular imports
-    from app.models import Gateway, Route, User, Service, UsageLog, ApiKey, RequestHash, MerkleRoot
+    from app.models import Gateway, Route, User, Service, UsageLog, ApiKey, RequestHash, MerkleRoot, AnomalyScoreLog
     from sqlalchemy import inspect, text
     
     Base.metadata.create_all(bind=engine)
-    
+
+    # Legacy in-place column migrations below use SQLite-specific DDL and only
+    # matter for pre-existing local SQLite files. On a fresh Postgres database
+    # create_all() already produced every column, so skip them entirely.
+    if not _is_sqlite:
+        return
+
     # Check if api_key_revealed column exists in users table, add it if missing
     inspector = inspect(engine)
     if 'users' in inspector.get_table_names():

@@ -1,0 +1,41 @@
+# AEGIS Gateway — local stack for Feature A (Adaptive Anomaly Detection).
+#
+#   docker compose up --build
+#
+# Brings up Redis, the FastAPI gateway, and the async ML scoring worker. The
+# gateway and worker share the same image and code; only the command differs.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  gateway:
+    build: .
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      AEGIS_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Async ML worker: consumes the feature stream, scores, caches risk decisions.
+  # Scale horizontally with:  docker compose up --scale anomaly-worker=3
+  anomaly-worker:
+    build: .
+    command: python -m app.anomaly.worker
+    environment:
+      AEGIS_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped

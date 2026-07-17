@@ -294,3 +294,7 @@ dist/
 
 # Virtual environment
 .venv
+
+# Local dataset (large) and editor history
+data/
+.history/

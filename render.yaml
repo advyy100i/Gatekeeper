@@ -1,0 +1,65 @@
+# Render Blueprint for AEGIS Gateway.
+#
+# Deploys the backend as a single free-tier web service with the anomaly scorer
+# embedded (AEGIS_EMBED_WORKER=1), plus a managed Redis (Key Value) and a
+# managed Postgres. Connect this repo in the Render dashboard → "New" →
+# "Blueprint", and Render reads this file. See DEPLOYMENT.md for the full walk-through.
+#
+# NOTE on the worker: Render's free plan does not include a standalone Background
+# Worker, so the scorer runs in-process here. To split it into its own service
+# (the production shape), uncomment the `aegis-anomaly-worker` block below and
+# move both services to a paid instance type.
+
+databases:
+  - name: aegis-postgres
+    plan: free
+    databaseName: aegis
+    user: aegis
+
+services:
+  # Managed Redis-compatible store (Streams + per-key baselines + score cache).
+  - type: keyvalue
+    name: aegis-redis
+    plan: free
+    ipAllowList: []          # reachable only from other Render services
+
+  # FastAPI gateway (+ embedded anomaly worker on free tier).
+  - type: web
+    name: aegis-gateway
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    dockerCommand: sh -c "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: AEGIS_EMBED_WORKER
+        value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aegis-postgres
+          property: connectionString
+      - key: AEGIS_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: aegis-redis
+          property: connectionString
+      - key: CORS_ALLOW_ORIGINS
+        sync: false          # set to your Vercel frontend URL in the dashboard
+
+  # --- Production (paid) shape: dedicated worker, gateway without embedding ---
+  # - type: worker
+  #   name: aegis-anomaly-worker
+  #   runtime: docker
+  #   dockerfilePath: ./Dockerfile
+  #   plan: starter
+  #   dockerCommand: python -m app.anomaly.worker
+  #   envVars:
+  #     - key: DATABASE_URL
+  #       fromDatabase:
+  #         name: aegis-postgres
+  #         property: connectionString
+  #     - key: AEGIS_REDIS_URL
+  #       fromService:
+  #         type: keyvalue
+  #         name: aegis-redis
+  #         property: connectionString

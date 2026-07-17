@@ -14,8 +14,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import Optional, Dict, List
 from app.database import init_db, get_db
-from app.models import User, Service, UsageLog, ApiKey, BotDetectionLog, ServiceConfig, RequestHash, MerkleRoot
+from app.models import User, Service, UsageLog, ApiKey, BotDetectionLog, ServiceConfig, RequestHash, MerkleRoot, AnomalyScoreLog
 from app.bot_detector import calculate_bot_score, classify_traffic, should_block
+from app.anomaly import gateway_hook as anomaly_gateway
+from app.anomaly import config as anomaly_cfg
+from app.anomaly.features import FeatureEvent
+from app.anomaly.risk_engine import ACTION_TARPIT as ANOMALY_TARPIT, ACTION_BLOCK as ANOMALY_BLOCK
 import httpx
 import secrets
 import time
@@ -296,10 +300,17 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configure CORS
+# Configure CORS. Origins come from CORS_ALLOW_ORIGINS (comma-separated) so the
+# deployed frontend (e.g. a Vercel URL) can be allowed in production; defaults to
+# the local dev frontend.
+_cors_origins = [
+    o.strip() for o in os.getenv(
+        "CORS_ALLOW_ORIGINS", "http://localhost:3000"
+    ).split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -308,8 +319,25 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database on startup."""
+    """Initialize the database and, when embedded, the anomaly scoring worker."""
     init_db()
+
+    # On hosting tiers without a separate background-worker process (e.g. Render
+    # free), run the anomaly scorer in-process as a daemon thread by setting
+    # AEGIS_EMBED_WORKER=1. In a full deployment the worker runs as its own
+    # service instead (see render.yaml) and this stays disabled.
+    if os.getenv("AEGIS_EMBED_WORKER", "").lower() in ("1", "true", "yes"):
+        import threading
+        from app.anomaly.worker import run_worker
+
+        def _run():
+            try:
+                run_worker()
+            except Exception as exc:  # never take down the gateway
+                logger.error(f"embedded anomaly worker stopped: {exc}")
+
+        threading.Thread(target=_run, name="anomaly-worker", daemon=True).start()
+        logger.info("embedded anomaly worker thread started")
 
 
 @app.get("/")
@@ -670,6 +698,34 @@ async def proxy_request(
         path_suffix = path_suffix.lstrip('/')
         target_url = f"{target_url}/{path_suffix}"
     
+    # Look up the API key object once (used by anomaly scoring, watermarking, hashing)
+    api_key_obj = db.query(ApiKey).filter(
+        ApiKey.key == api_key,
+        ApiKey.is_active == True
+    ).first()
+
+    # ------------------------------------------------------------------
+    # Adaptive anomaly enforcement (Feature A)
+    # Reads the async ML worker's cached risk decision — one Redis GET,
+    # fail-open. Static controls (auth, rate limit) have already run.
+    # ------------------------------------------------------------------
+    if api_key_obj:
+        anomaly_action, anomaly_risk = await anomaly_gateway.get_decision(api_key_obj.id)
+        if anomaly_action == ANOMALY_BLOCK:
+            logger.warning(
+                f"Anomaly BLOCK: api_key_id={api_key_obj.id} risk={anomaly_risk:.3f}"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Request blocked by adaptive security (anomalous behavior detected)"
+            )
+        elif anomaly_action == ANOMALY_TARPIT:
+            logger.info(
+                f"Anomaly TARPIT: api_key_id={api_key_obj.id} risk={anomaly_risk:.3f} "
+                f"delay={anomaly_cfg.TARPIT_SECONDS}s"
+            )
+            await asyncio.sleep(anomaly_cfg.TARPIT_SECONDS)
+
     # Get safe headers (exclude host, content-length, and X-API-Key)
     excluded_headers = {'host', 'content-length', 'x-api-key', 'connection', 'transfer-encoding'}
     headers = {
@@ -713,12 +769,27 @@ async def proxy_request(
                 if key.lower() not in {'content-length', 'connection', 'transfer-encoding', 'content-encoding'}
             }
             
-            # Get API key object for watermarking and hashing
-            api_key_obj = db.query(ApiKey).filter(
-                ApiKey.key == api_key,
-                ApiKey.is_active == True
-            ).first()
-            
+            # api_key_obj was fetched once at the top of proxy_request
+
+            # ------------------------------------------------------------------
+            # Publish feature event for async anomaly scoring (metadata only,
+            # never bodies). Fire-and-forget: scoring stays off the hot path.
+            # ------------------------------------------------------------------
+            if api_key_obj:
+                try:
+                    event = FeatureEvent(
+                        api_key_id=api_key_obj.id,
+                        service_id=service.id,
+                        ts=time.time(),
+                        method=method,
+                        path=str(request.url.path),
+                        status=response.status_code,
+                        payload_size=len(response.content or b""),
+                    )
+                    asyncio.create_task(anomaly_gateway.publish_event(event))
+                except Exception as e:
+                    logger.debug(f"anomaly event publish skipped: {e}")
+
             # Store request hash for cryptographic transparency
             if api_key_obj:
                 try:
@@ -1933,6 +2004,86 @@ async def delete_service(service_id: int, db: Session = Depends(get_db)):
         "message": f"Service '{service_name}' and all related data deleted successfully",
         "service_id": service_id,
         "service_name": service_name
+    }
+
+
+# ============================================================================
+# Adaptive Anomaly Detection Endpoints (Feature A)
+# ============================================================================
+
+@app.get("/security/anomaly/status")
+async def get_anomaly_status():
+    """
+    Health of the anomaly detection subsystem: worker liveness (heartbeat)
+    and whether the gateway is currently in degraded (fail-open) mode.
+    """
+    alive = await anomaly_gateway.worker_alive()
+    return {
+        "worker_alive": alive,
+        "degraded_mode": anomaly_gateway.is_degraded(),
+        "mode": "active" if alive else "degraded (fail-open, static controls only)",
+        "thresholds": {
+            "log": anomaly_cfg.THRESHOLD_LOG,
+            "tarpit": anomaly_cfg.THRESHOLD_TARPIT,
+            "block": anomaly_cfg.THRESHOLD_BLOCK,
+        },
+        "weights": {
+            "global": anomaly_cfg.WEIGHT_GLOBAL,
+            "per_key": anomaly_cfg.WEIGHT_PERKEY,
+            "enumeration": anomaly_cfg.WEIGHT_ENUM,
+            "auth_abuse": anomaly_cfg.WEIGHT_AUTH,
+        },
+    }
+
+
+@app.get("/security/anomaly/scores")
+async def get_anomaly_scores(
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    """
+    Recent elevated risk decisions (risk >= LOG threshold), newest first.
+    Sub-scores are included so every decision is explainable.
+    """
+    limit = max(1, min(limit, 500))
+    logs = db.query(AnomalyScoreLog).order_by(
+        AnomalyScoreLog.created_at.desc()
+    ).limit(limit).all()
+    return {
+        "count": len(logs),
+        "scores": [
+            {
+                "id": log.id,
+                "api_key_id": log.api_key_id,
+                "service_id": log.service_id,
+                "risk": round(log.risk, 4),
+                "action": log.action,
+                "endpoint": log.endpoint,
+                "sub_scores": {
+                    "global": round(log.score_global, 4),
+                    "per_key": round(log.score_perkey, 4),
+                    "enumeration": round(log.score_enum, 4),
+                    "auth_abuse": round(log.score_auth, 4),
+                },
+                "timestamp": log.created_at.isoformat() if log.created_at else None,
+            }
+            for log in logs
+        ],
+    }
+
+
+@app.get("/security/anomaly/risk/{api_key_id}")
+async def get_current_risk(api_key_id: int):
+    """
+    The live cached risk decision for an API key (what the gateway would
+    enforce right now). Empty if no recent score (neutral / fail-open).
+    """
+    action, risk = await anomaly_gateway.get_decision(api_key_id)
+    return {
+        "api_key_id": api_key_id,
+        "action": action,
+        "risk": round(risk, 4) if risk is not None else None,
+        "scored": risk is not None,
     }
 
 

@@ -140,6 +140,27 @@ class RequestHash(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class AnomalyScoreLog(Base):
+    """
+    AnomalyScoreLog persists elevated risk decisions (risk >= LOG threshold)
+    from the adaptive anomaly detection pipeline for auditing and the
+    security dashboard. Sub-scores are stored so every decision is explainable.
+    """
+    __tablename__ = "anomaly_scores"
+
+    id = Column(Integer, primary_key=True, index=True)
+    api_key_id = Column(Integer, ForeignKey("api_keys.id"), nullable=False, index=True)
+    service_id = Column(Integer, ForeignKey("services.id"), nullable=False, index=True)
+    risk = Column(Float, nullable=False)           # fused risk score [0, 1]
+    score_global = Column(Float, nullable=False)   # g: HalfSpaceTrees
+    score_perkey = Column(Float, nullable=False)   # p: per-key behavioral
+    score_enum = Column(Float, nullable=False)     # e: enumeration (HLL)
+    score_auth = Column(Float, nullable=False)     # a: auth-failure abuse
+    action = Column(String, nullable=False)        # log / tarpit / block
+    endpoint = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class MerkleRoot(Base):
     """
     MerkleRoot model for storing computed Merkle roots.
