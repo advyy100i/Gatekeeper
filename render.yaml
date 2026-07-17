@@ -9,20 +9,17 @@
 # Worker, so the scorer runs in-process here. To split it into its own service
 # (the production shape), uncomment the `aegis-anomaly-worker` block below and
 # move both services to a paid instance type.
-
 databases:
   - name: aegis-postgres
     plan: free
     databaseName: aegis
     user: aegis
-
 services:
   # Managed Redis-compatible store (Streams + per-key baselines + score cache).
   - type: keyvalue
     name: aegis-redis
     plan: free
     ipAllowList: []          # reachable only from other Render services
-
   # FastAPI gateway (+ embedded anomaly worker on free tier).
   - type: web
     name: aegis-gateway
@@ -45,7 +42,6 @@ services:
           property: connectionString
       - key: CORS_ALLOW_ORIGINS
         sync: false          # set to your Vercel frontend URL in the dashboard
-
   # --- Production (paid) shape: dedicated worker, gateway without embedding ---
   # - type: worker
   #   name: aegis-anomaly-worker
