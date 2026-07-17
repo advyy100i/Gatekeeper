@@ -1,3 +1,4 @@
+import { API_BASE_URL } from "@/lib/api";
 "use client";
 
 import { useState } from "react";
@@ -264,12 +265,12 @@ export default function APIsPage() {
                   </Label>
                   <div className="flex items-center gap-2">
                     <div className="flex-1 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm">
-                      {`http://127.0.0.1:8000${success.gateway_url}`}
+                      {`${API_BASE_URL}${success.gateway_url}`}
                     </div>
                     <Button
                       variant="outline"
                       size="icon"
-                      onClick={() => copyToClipboard(`http://127.0.0.1:8000${success.gateway_url}`, "gateway")}
+                      onClick={() => copyToClipboard(`${API_BASE_URL}${success.gateway_url}`, "gateway")}
                       className="shrink-0 transition-all hover:scale-105"
                     >
                       {copiedField === "gateway" ? (
@@ -327,7 +328,7 @@ export default function APIsPage() {
                   </Label>
                   <div className="rounded-md border border-border bg-muted/30 p-3">
                     <code className="text-xs text-muted-foreground">
-                      <div className="mb-1">curl http://127.0.0.1:8000{success.gateway_url} \</div>
+                      <div className="mb-1">curl ${API_BASE_URL}{success.gateway_url} \</div>
                       <div className="pl-4">-H "X-API-Key: {success.api_key?.substring(0, 20)}..."</div>
                     </code>
                   </div>

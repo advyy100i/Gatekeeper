@@ -42,7 +42,7 @@ interface UsageStats {
  * Examples:
  * - "2" → 2
  * - "/proxy/2" → 2
- * - "http://127.0.0.1:8000/proxy/2" → 2
+ * - "${API_BASE_URL}/proxy/2" → 2
  * - "http://localhost:8000/proxy/123" → 123
  * 
  * @param input - Service ID number or Gateway URL
@@ -152,7 +152,7 @@ export default function UsagePage() {
 
     try {
       // Send GET request to /usage/{service_id} with X-API-Key header
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || API_BASE_URL;
       const url = `${API_BASE_URL}/usage/${serviceId}`;
       
       const response = await fetch(url, {
@@ -250,7 +250,7 @@ export default function UsagePage() {
                 <Input
                   id="serviceInput"
                   type="text"
-                  placeholder="2 or /proxy/2 or http://127.0.0.1:8000/proxy/2"
+                  placeholder="2 or /proxy/2 or ${API_BASE_URL}/proxy/2"
                   value={input}
                   onChange={(e) => {
                     setInput(e.target.value);
@@ -270,7 +270,7 @@ export default function UsagePage() {
                   <ul className="list-disc list-inside space-y-0.5 ml-1">
                     <li>Service ID: <code className="bg-muted px-1 rounded">2</code></li>
                     <li>Gateway URL: <code className="bg-muted px-1 rounded">/proxy/2</code></li>
-                    <li>Full URL: <code className="bg-muted px-1 rounded">http://127.0.0.1:8000/proxy/2</code></li>
+                    <li>Full URL: <code className="bg-muted px-1 rounded">{API_BASE_URL}/proxy/2</code></li>
                   </ul>
                 </div>
               </div>

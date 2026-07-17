@@ -1,3 +1,4 @@
+import { API_BASE_URL } from "@/lib/api";
 "use client";
 
 import { useState, useEffect } from "react";
@@ -116,7 +117,7 @@ export default function PlaygroundPage() {
 
     const startTime = Date.now();
     // Build proxy URL with optional path suffix
-    let proxyUrl = `http://127.0.0.1:8000/proxy/${selectedServiceId}`;
+    let proxyUrl = `${API_BASE_URL}/proxy/${selectedServiceId}`;
     if (pathSuffix.trim()) {
       const cleanPath = pathSuffix.trim().replace(/^\/+/, '');
       proxyUrl = `${proxyUrl}/${cleanPath}`;
@@ -354,7 +355,7 @@ export default function PlaygroundPage() {
                 <div className="rounded-md border border-border/50 bg-muted/30 p-3">
                   <p className="text-xs text-muted-foreground mb-1">Request URL</p>
                   <code className="text-xs font-mono">
-                    {method} http://127.0.0.1:8000/proxy/{selectedServiceId}
+                    {method} ${API_BASE_URL}/proxy/{selectedServiceId}
                   </code>
                 </div>
               )}
