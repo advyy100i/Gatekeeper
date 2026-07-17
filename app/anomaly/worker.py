@@ -61,6 +61,21 @@ class AnomalyScorer:
         return decision
 
 
+# Live traffic counters (for the dashboard's believable allowed-vs-flagged ratio).
+COUNTER_KEYS = ("processed", "allow", "log", "tarpit", "block")
+
+
+def bump_counters(redis_client, decision: RiskDecision) -> None:
+    """Increment the processed/allow/log/tarpit/block counters. Never raises."""
+    try:
+        pipe = redis_client.pipeline()
+        pipe.incr("anom:counter:processed")
+        pipe.incr(f"anom:counter:{decision.action}")
+        pipe.execute()
+    except Exception:
+        pass
+
+
 def _persist_elevated(decision: RiskDecision, ev: FeatureEvent) -> None:
     """Audit trail: persist scores at/above the LOG threshold to the database."""
     if decision.risk < cfg.THRESHOLD_LOG:
@@ -118,6 +133,7 @@ def run_worker() -> None:
                 try:
                     ev = FeatureEvent.from_stream(fields)
                     decision = scorer.process_event(ev)
+                    bump_counters(r, decision)
                     _persist_elevated(decision, ev)
                 except Exception as exc:
                     logger.exception("failed to score event %s: %s", msg_id, exc)

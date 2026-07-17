@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/components/ui/toaster";
-import { getApiKey, setApiKey } from "@/lib/api";
+import { getApiKey, setApiKey, API_BASE_URL } from "@/lib/api";
 import {
   Table,
   TableBody,
@@ -152,7 +152,6 @@ export default function UsagePage() {
 
     try {
       // Send GET request to /usage/{service_id} with X-API-Key header
-      const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || API_BASE_URL;
       const url = `${API_BASE_URL}/usage/${serviceId}`;
       
       const response = await fetch(url, {

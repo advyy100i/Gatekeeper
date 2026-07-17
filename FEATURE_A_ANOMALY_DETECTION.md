@@ -395,6 +395,11 @@ AEGIS_REDIS_URL=redis://localhost:6380/0 python -m scripts.smoke_live_loop
 # Tests
 pytest tests/test_anomaly.py -q
 
+# Live dashboard demo — drives attack traffic through the REAL scorer so the
+# "Threat Detection" page populates with blocked/tarpitted decisions. This is
+# also wired to the "Simulate attack" button on that page.
+curl -X POST $API/security/anomaly/simulate -H 'Content-Type: application/json' -d '{"scenario":"all"}'
+
 # Live subsystem health / recent decisions
 curl localhost:8000/security/anomaly/status
 curl localhost:8000/security/anomaly/scores

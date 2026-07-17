@@ -31,6 +31,8 @@ services:
     envVars:
       - key: AEGIS_EMBED_WORKER
         value: "1"
+      - key: AEGIS_ENUM_WINDOW      # 5-min HLL windows — the setting the eval validated
+        value: "300"
       - key: DATABASE_URL
         fromDatabase:
           name: aegis-postgres

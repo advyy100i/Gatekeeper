@@ -1,6 +1,6 @@
-import { API_BASE_URL } from "@/lib/api";
 "use client";
 
+import { API_BASE_URL } from "@/lib/api";
 import { useState, useEffect } from "react";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";

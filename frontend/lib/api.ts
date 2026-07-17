@@ -612,4 +612,75 @@ export const api = {
       scored: boolean;
     }>(`/security/anomaly/risk/${apiKeyId}`);
   },
+
+  /**
+   * Live traffic totals (allowed vs flagged) + last real-traffic replay summary.
+   */
+  getAnomalyOverview: async () => {
+    return apiRequest<{
+      processed: number;
+      allowed: number;
+      logged: number;
+      tarpitted: number;
+      blocked: number;
+      flagged: number;
+      allowed_pct: number;
+      flagged_pct: number;
+      replay_running: boolean;
+      last_replay: {
+        distinct_real_clients: number;
+        injected_attack: {
+          enabled: boolean;
+          client_id: number | null;
+          events: number;
+          detected: number;
+          recall: number;
+        };
+        real_flagged_samples: Array<{
+          api_key_id: number;
+          endpoint: string;
+          action: string;
+          risk: number;
+        }>;
+      } | null;
+    }>("/security/anomaly/overview");
+  },
+
+  /**
+   * Replay REAL HTTP traffic (NASA-HTTP) through the live scorer in the
+   * background. Returns immediately; watch the overview/table fill in.
+   */
+  replayRealTraffic: async (events = 4000, injectAttack = true) => {
+    return apiRequest<{ status: string; events: number; message: string }>(
+      "/security/anomaly/replay",
+      { method: "POST", body: JSON.stringify({ events, inject_attack: injectAttack }) }
+    );
+  },
+
+  /**
+   * Drive synthetic attack traffic through the live scoring pipeline (demo).
+   * scenario: "credential_stuffing" | "enumeration" | "low_and_slow" | "all".
+   */
+  simulateAnomalyAttack: async (scenario = "all") => {
+    return apiRequest<{
+      message: string;
+      scenarios_run: number;
+      results: Array<{
+        scenario: string;
+        demo_key_id: number;
+        warmup_events: number;
+        attack_events: number;
+        flagged: number;
+        blocked: number;
+        tarpitted: number;
+        recall: number;
+        peak_risk: number;
+        first_detection_after: number | null;
+        final_action: string;
+      }>;
+    }>("/security/anomaly/simulate", {
+      method: "POST",
+      body: JSON.stringify({ scenario }),
+    });
+  },
 };

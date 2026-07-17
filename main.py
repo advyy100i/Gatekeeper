@@ -2088,6 +2088,423 @@ async def get_current_risk(api_key_id: int):
     }
 
 
+class SimulateAttackRequest(BaseModel):
+    # "credential_stuffing" | "enumeration" | "low_and_slow" | "all"
+    scenario: str = "all"
+
+
+# Attack presets: (generator, warmup+attack event counts) kept modest so a
+# button click returns in ~1-2s while still crossing the detection threshold.
+_ATTACK_SCENARIOS = {
+    "credential_stuffing": 120,
+    "enumeration": 150,
+    "low_and_slow": 200,
+}
+
+
+@app.post("/security/anomaly/simulate")
+def simulate_anomaly_attack(request: SimulateAttackRequest):
+    """
+    Drive synthetic attack traffic through the REAL scoring pipeline so the
+    dashboard visibly populates. This is not a mock: every event runs through
+    the same ``AnomalyScorer`` (per-key baselines -> global model -> fusion),
+    writes the same per-key Redis state, caches the same decision, and persists
+    to the same ``AnomalyScoreLog`` table that live proxied traffic uses.
+
+    Each run uses fresh demo key ids in the 9xx,xxx,xxx range, so every attacker
+    warms up a baseline from scratch and then turns malicious (account-takeover
+    shape) — independent of real traffic and of previous runs.
+
+    Sync endpoint: FastAPI runs it in a threadpool (the scorer uses sync Redis).
+    """
+    import random
+    import redis as sync_redis
+    from app.anomaly.worker import AnomalyScorer, _persist_elevated
+    from simulator.traffic import (
+        LABEL_NORMAL, NormalClient, credential_stuffing, enumeration,
+        low_and_slow, merge_timelines,
+    )
+
+    scenario = request.scenario.lower().strip()
+    if scenario == "all":
+        scenarios = list(_ATTACK_SCENARIOS.keys())
+    elif scenario in _ATTACK_SCENARIOS:
+        scenarios = [scenario]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown scenario '{scenario}'. Valid: "
+                   f"{', '.join(_ATTACK_SCENARIOS)}, all",
+        )
+
+    # Connect to the same Redis the worker/gateway use. If it's down, the whole
+    # feature is offline — say so clearly rather than silently doing nothing.
+    try:
+        r = sync_redis.Redis.from_url(
+            anomaly_cfg.REDIS_URL, decode_responses=True,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+        r.ping()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"anomaly scoring engine unavailable (Redis unreachable): {exc}",
+        )
+
+    generators = {
+        "credential_stuffing": credential_stuffing,
+        "enumeration": enumeration,
+        "low_and_slow": low_and_slow,
+    }
+    service_id = 999  # reserved demo service
+    scorer = AnomalyScorer(r)
+    results = []
+    local = defaultdict(int)  # this run's own action tally (warmup + attack)
+
+    for scen in scenarios:
+        # Fresh attacker identity each run -> honest cold-start + warmup.
+        key_id = 900_000_000 + random.randint(0, 89_999_999)
+        rng = random.Random(key_id)
+        t0 = time.time()
+
+        # Warmup on a SIMULATED clock spanning several enumeration windows, so the
+        # windowed-HLL baseline (enum_n) actually forms before the attack — this
+        # is what lets the enumeration / low-and-slow detectors fire (they are in
+        # cold-start until the key has multiple completed windows of history).
+        # Runs instantly regardless of span because the pipeline uses event time.
+        window = anomaly_cfg.ENUM_WINDOW_SECONDS
+        warmup_span = window * (anomaly_cfg.ENUM_MERGE_BUCKETS + 2)
+        base_interval = max(3.0, window / 12.0)   # ~12 benign events per window
+        warmup = list(
+            NormalClient(key_id, service_id, rng, base_interval=base_interval)
+            .events(t0, t0 + warmup_span)
+        )
+        attack_start = t0 + warmup_span + 10
+        attack = generators[scen](key_id, service_id, attack_start,
+                                  n=_ATTACK_SCENARIOS[scen])
+        timeline = merge_timelines(warmup, attack)
+
+        from app.anomaly.worker import bump_counters
+        flagged = tarpit = blocked = 0
+        peak_risk = 0.0
+        first_detect = None
+        attack_seen = 0
+        final_action = "allow"
+        for le in timeline:
+            decision = scorer.process_event(le.ev)
+            bump_counters(r, decision)
+            _persist_elevated(decision, le.ev)
+            local[decision.action] += 1
+            if le.label != LABEL_NORMAL:
+                attack_seen += 1
+                is_flag = decision.action in (ANOMALY_TARPIT, ANOMALY_BLOCK)
+                if is_flag:
+                    flagged += 1
+                    if decision.action == ANOMALY_BLOCK:
+                        blocked += 1
+                    else:
+                        tarpit += 1
+                    if first_detect is None:
+                        first_detect = attack_seen
+                peak_risk = max(peak_risk, decision.risk)
+                final_action = decision.action
+
+        results.append({
+            "scenario": scen,
+            "demo_key_id": key_id,
+            "warmup_events": len(warmup),
+            "attack_events": attack_seen,
+            "flagged": flagged,
+            "blocked": blocked,
+            "tarpitted": tarpit,
+            "recall": round(flagged / attack_seen, 3) if attack_seen else 0.0,
+            "peak_risk": round(peak_risk, 3),
+            "first_detection_after": first_detect,
+            "final_action": final_action,
+        })
+
+    # Store this run's self-contained totals as the "last demo run", so the
+    # dashboard overview shows THIS simulation's numbers — independent of any
+    # replay or live traffic (which is why the two demos no longer overwrite
+    # each other's headline stats).
+    processed = sum(local.values())
+    allowed = local.get("allow", 0)
+    flagged = local.get("log", 0) + local.get("tarpit", 0) + local.get("block", 0)
+    try:
+        r.set("anom:demo:summary", json.dumps({
+            "type": "simulate",
+            "totals": {
+                "processed": processed,
+                "allowed": allowed,
+                "flagged": flagged,
+                "allowed_pct": round(100.0 * allowed / processed, 2) if processed else 0.0,
+                "flagged_pct": round(100.0 * flagged / processed, 3) if processed else 0.0,
+            },
+            "scenarios": results,
+        }))
+    except Exception:
+        pass
+
+    return {
+        "message": "Attack traffic scored through the live pipeline. "
+                   "Open the recent-decisions table to inspect the results.",
+        "scenarios_run": len(results),
+        "results": results,
+    }
+
+
+@app.get("/security/anomaly/overview")
+def get_anomaly_overview():
+    """
+    Live traffic totals: how many requests the scorer has seen and how they
+    were dispatched (allow / log / tarpit / block). This is what makes the
+    picture believable — the overwhelming majority of real traffic is allowed.
+    """
+    import redis as sync_redis
+    from app.anomaly.worker import COUNTER_KEYS
+
+    replay_running = False
+    last_run = None
+    try:
+        r = sync_redis.Redis.from_url(
+            anomaly_cfg.REDIS_URL, decode_responses=True,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+        vals = r.mget([f"anom:counter:{k}" for k in COUNTER_KEYS])
+        replay_running = bool(r.get("anom:replay:running"))
+        raw_summary = r.get("anom:demo:summary")
+        if raw_summary:
+            last_run = json.loads(raw_summary)
+    except Exception:
+        vals = [None] * len(COUNTER_KEYS)
+
+    counts = {k: int(v or 0) for k, v in zip(COUNTER_KEYS, vals)}
+    # last_replay is only populated when the most recent demo was a replay, so
+    # the frontend's injected-attack card appears only for replays.
+    last_replay = last_run if (last_run and last_run.get("type") == "replay") else None
+
+    # Show the LAST DEMO RUN's own self-contained totals (replay or simulate),
+    # so each demo displays its own numbers and clicking one never rewrites the
+    # other's headline stats. While a replay is streaming we instead show the
+    # live counters so the user watches them climb in real time.
+    if last_run and last_run.get("totals") and not replay_running:
+        t = last_run["totals"]
+        return {
+            "processed": t["processed"],
+            "allowed": t["allowed"],
+            "flagged": t["flagged"],
+            "allowed_pct": t["allowed_pct"],
+            "flagged_pct": t["flagged_pct"],
+            "source": last_run.get("type", "last_run"),
+            "replay_running": replay_running,
+            "last_run": last_run,
+            "last_replay": last_replay,
+        }
+
+    processed = counts["processed"]
+    flagged = counts["log"] + counts["tarpit"] + counts["block"]
+    return {
+        "processed": processed,
+        "allowed": counts["allow"],
+        "logged": counts["log"],
+        "tarpitted": counts["tarpit"],
+        "blocked": counts["block"],
+        "flagged": flagged,
+        "allowed_pct": round(100.0 * counts["allow"] / processed, 2) if processed else 0.0,
+        "flagged_pct": round(100.0 * flagged / processed, 3) if processed else 0.0,
+        "source": "live_counters",
+        "replay_running": replay_running,
+        "last_run": last_run,
+        "last_replay": last_replay,
+    }
+
+
+class ReplayRequest(BaseModel):
+    events: int = 4000          # real requests to stream through the scorer
+    inject_attack: bool = True  # inject one realistic attack from a real client
+
+
+# Bundled sample ships with the code (Docker COPY), so the real-traffic replay
+# works on a deployed instance even though the full 20MB dataset is gitignored.
+_ACCESS_LOG_SAMPLE = "simulator/sample_data/nasa_sample.log.gz"
+
+
+def _resolve_access_log() -> Optional[str]:
+    """Full local dataset if downloaded, else the bundled sample, else None."""
+    override = os.getenv("AEGIS_ACCESS_LOG")
+    if override and os.path.exists(override):
+        return override
+    if os.path.exists("data/nasa_jul95.gz"):
+        return "data/nasa_jul95.gz"
+    if os.path.exists(_ACCESS_LOG_SAMPLE):
+        return _ACCESS_LOG_SAMPLE
+    return None
+
+
+def _replay_worker(events_target: int, inject_attack: bool) -> None:
+    """
+    Background job: stream REAL NASA-HTTP traffic through the live scorer,
+    updating the live counters as it goes (so the dashboard fills in real time)
+    and storing a final summary in Redis. Runs in a daemon thread.
+    """
+    import random
+    import redis as sync_redis
+    from collections import Counter
+    from app.anomaly.worker import (
+        AnomalyScorer, bump_counters, COUNTER_KEYS, _persist_elevated,
+    )
+    from app.anomaly.risk_engine import ACTION_ALLOW
+    from simulator.access_log_loader import iter_access_log
+    from simulator.traffic import low_and_slow
+
+    data_path = _resolve_access_log()
+    r = sync_redis.Redis.from_url(anomaly_cfg.REDIS_URL, decode_responses=True)
+
+    try:
+        events = list(iter_access_log(data_path, limit=events_target))
+        r.delete(*[f"anom:counter:{k}" for k in COUNTER_KEYS])
+
+        # Clean per-key state so each replay is reproducible. Critical because the
+        # NASA timestamps are fixed (1995): re-running reuses the same HLL window
+        # buckets, and HLL only counts up — without this, distinct-id counts
+        # accumulate across runs, saturate, and spuriously flag real clients.
+        for pattern in ("anom:stats:*", "anom:rate:*", "anom:wreq:*",
+                        "anom:hll:*", "anom:risk:*"):
+            batch = []
+            for k in r.scan_iter(match=pattern, count=500):
+                batch.append(k)
+                if len(batch) >= 500:
+                    r.delete(*batch)
+                    batch = []
+            if batch:
+                r.delete(*batch)
+
+        scorer = AnomalyScorer(r)
+        split = int(len(events) * 0.6)
+        warmup, evalset = events[:split], events[split:]
+
+        # Replay-scoped tally: counts ONLY this replay's events, so the overview
+        # it produces reconciles exactly with the injected-attack recall (the
+        # global counters also see live proxy/simulate traffic and would drift).
+        local = Counter()
+        for ev in warmup:
+            d = scorer.process_event(ev)
+            bump_counters(r, d)
+            local[d.action] += 1
+
+        injected, injected_key = [], None
+        if inject_attack and evalset:
+            freq = Counter(ev.api_key_id for ev in warmup)
+            cand = [k for k, c in freq.most_common(30) if c >= anomaly_cfg.N_MIN + 5]
+            if cand:
+                injected_key = cand[0]
+                t0 = evalset[0].ts + 5.0
+                injected = [le.ev for le in low_and_slow(injected_key, 999, t0, n=120)]
+
+        timeline = sorted(list(evalset) + injected, key=lambda ev: ev.ts)
+        injected_ids = {id(ev) for ev in injected}
+        flagged_samples, attack_flagged, attack_total = [], 0, 0
+        for ev in timeline:
+            d = scorer.process_event(ev)
+            bump_counters(r, d)
+            _persist_elevated(d, ev)
+            local[d.action] += 1
+            if id(ev) in injected_ids:
+                attack_total += 1
+                if d.action in (ANOMALY_TARPIT, ANOMALY_BLOCK):
+                    attack_flagged += 1
+            elif d.action != ACTION_ALLOW and len(flagged_samples) < 8:
+                flagged_samples.append({
+                    "api_key_id": ev.api_key_id, "endpoint": ev.path,
+                    "action": d.action, "risk": round(d.risk, 3),
+                })
+
+        processed = sum(local.values())
+        allowed = local.get("allow", 0)
+        flagged = local.get("log", 0) + local.get("tarpit", 0) + local.get("block", 0)
+        summary = {
+            "type": "replay",
+            "distinct_real_clients": len(set(ev.api_key_id for ev in events)),
+            "totals": {
+                "processed": processed,
+                "allowed": allowed,
+                "flagged": flagged,
+                "allowed_pct": round(100.0 * allowed / processed, 2) if processed else 0.0,
+                "flagged_pct": round(100.0 * flagged / processed, 3) if processed else 0.0,
+            },
+            "injected_attack": {
+                "enabled": bool(injected_key),
+                "client_id": injected_key,
+                "events": attack_total,
+                "detected": attack_flagged,
+                "recall": round(attack_flagged / attack_total, 3) if attack_total else 0.0,
+            },
+            "real_flagged_samples": flagged_samples,
+        }
+        r.set("anom:demo:summary", json.dumps(summary))
+    except Exception as exc:
+        logger.warning("replay worker failed: %s", exc)
+    finally:
+        try:
+            r.delete("anom:replay:running")
+        except Exception:
+            pass
+
+
+@app.post("/security/anomaly/replay")
+def replay_real_traffic(request: ReplayRequest):
+    """
+    Replay REAL HTTP traffic (NASA-HTTP access log) through the live scorer, so
+    the dashboard shows the believable picture: thousands of genuine requests
+    from thousands of real client IPs, ~99.9% allowed, and only a true handful
+    flagged — the actual high-volume crawlers plus (optionally) one realistic
+    attack injected from a previously-benign real client (the ATO shape).
+
+    Runs in the background so the dashboard's counters visibly climb in real
+    time. Local-only: needs the NASA dataset at data/nasa_jul95.gz (gitignored).
+    Download once:  curl -sSL -o data/nasa_jul95.gz \
+        https://ita.ee.lbl.gov/traces/NASA_access_log_Jul95.gz
+    """
+    import threading
+    import redis as sync_redis
+
+    data_path = _resolve_access_log()
+    if not data_path:
+        raise HTTPException(
+            status_code=503,
+            detail="no real-traffic dataset available (neither the full NASA-HTTP "
+                   "download nor the bundled sample was found).",
+        )
+    try:
+        r = sync_redis.Redis.from_url(
+            anomaly_cfg.REDIS_URL, decode_responses=True,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+        r.ping()
+        if r.get("anom:replay:running"):
+            raise HTTPException(status_code=409, detail="a replay is already in progress")
+        r.set("anom:replay:running", "1", ex=300)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"anomaly scoring engine unavailable (Redis unreachable): {exc}",
+        )
+
+    n = max(500, min(request.events, 20000))
+    threading.Thread(
+        target=_replay_worker, args=(n, request.inject_attack),
+        name="anomaly-replay", daemon=True,
+    ).start()
+    return {
+        "status": "started",
+        "events": n,
+        "message": "Replaying real NASA-HTTP traffic through the live scorer. "
+                   "Watch the traffic overview and recent-decisions table fill in.",
+    }
+
+
 # ============================================================================
 # Cryptographic Transparency Endpoints (Merkle Trees)
 # ============================================================================
