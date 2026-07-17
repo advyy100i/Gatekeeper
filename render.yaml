@@ -30,7 +30,7 @@ services:
     dockerfilePath: ./Dockerfile
     plan: free
     healthCheckPath: /health
-    dockerCommand: sh -c "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    dockerCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: AEGIS_EMBED_WORKER
         value: "1"
