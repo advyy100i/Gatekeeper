@@ -1,6 +1,6 @@
   # AEGIS — Gateway-as-a-Service
 
-  ## What it is, in one line
+  ## What it is
 
   AEGIS is an **API gateway** that also works as an **AI security layer**: it sits
   in front of any web API and, on top of normal gateway features (API keys, rate
@@ -20,7 +20,7 @@
 
   ---
 
-  ## How it works (the request flow)
+  ## How it works 
 <img width="922" height="561" alt="image" src="https://github.com/user-attachments/assets/082de4a5-b0a0-44da-a658-45524761f5ad" />
 
   1. A client sends its request to **AEGIS**, not to the real API.
@@ -147,7 +147,7 @@
   | `0.7 – 0.9` | **Tarpit** (add delay) |
   | `≥ 0.9` | **Block** (403) |
 
-  ## Key design choices (and why they matter)
+  ## Key design choices
 
   - **Async + fail-open:** scoring runs in a background worker; the request path
     only does one fast cache read. If scoring dies, traffic still flows and static
